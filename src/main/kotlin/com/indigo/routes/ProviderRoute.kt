@@ -434,6 +434,7 @@ import jakarta.inject.Named
 import org.apache.camel.Exchange
 import org.apache.camel.builder.RouteBuilder
 import org.apache.camel.model.rest.RestBindingMode
+import org.hibernate.exception.ConstraintViolationException
 
 @ApplicationScoped
 @Named("providerRoute")
@@ -441,10 +442,37 @@ class ProviderRoute(private val providerService: ProviderService) : RouteBuilder
 
     override fun configure() {
 
+        // REST Configuration
         restConfiguration()
             .component("platform-http")
             .bindingMode(RestBindingMode.json)
 
+        // Global Exception Handlers
+        onException(ConstraintViolationException::class.java)
+            .handled(true)
+            .log("Unique constraint violation: \${exception.message}")
+            .setHeader(Exchange.HTTP_RESPONSE_CODE, constant(400))
+            .setBody { exchange ->
+                mapOf(
+                    "code" to 400,
+                    "message" to "Duplicate entry",
+                    "error" to exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception::class.java)?.message
+                )
+            }
+
+        onException(Exception::class.java)
+            .handled(true)
+            .log("Unhandled error: \${exception}")
+            .setHeader(Exchange.HTTP_RESPONSE_CODE, constant(500))
+            .setBody { exchange ->
+                mapOf(
+                    "code" to 500,
+                    "message" to "Unexpected error",
+                    "error" to exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception::class.java)?.message
+                )
+            }
+
+        // REST Endpoints
         rest("/providers/v1")
             .post()
                 .consumes("application/json")
@@ -466,104 +494,71 @@ class ProviderRoute(private val providerService: ProviderService) : RouteBuilder
 
         from("direct:createProvider")
             .log("POST /providers/v1 - Create provider called")
-            .to("bean:providerRoute?method=onCreate")
+            .bean(this, "onCreate")
 
         from("direct:getAllProviders")
             .log("GET /providers/v1 - List providers called")
-            .to("bean:providerRoute?method=onList")
+            .bean(this, "onList")
 
         from("direct:getProviderById")
             .log("GET /providers/v1/{id} - Get provider by ID called")
-            .to("bean:providerRoute?method=onGetById(\${header.id})")
+            .bean(this, "onGetById").marshal().json()
 
         from("direct:updateProvider")
             .log("PUT /providers/v1/{id} - Update provider called")
-            .to("bean:providerRoute?method=onUpdate")
+            .bean(this, "onUpdate").marshal().json()
 
         from("direct:deleteProvider")
             .log("DELETE /providers/v1/{id} - Delete provider called")
-            .to("bean:providerRoute?method=onDelete")
+            .bean(this, "onDelete").marshal().json()
     }
 
     fun onList(exchange: Exchange): Any {
-        log.info("[LIST] Request received from user")
-        log.info("[LIST] Sending request to database")
-        return try {
-            val providers = providerService.listAll()
-            log.info("[LIST] Response received from database: $providers")
-            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 200)
-            mapOf("code" to 200, "message" to "Fetched all providers", "data" to providers)
-        } catch (e: Exception) {
-            log.error("[LIST] Exception: ${e.localizedMessage}")
-            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 500)
-            mapOf("code" to 500, "message" to "Unexpected error", "error" to e.localizedMessage)
-        }
+        log.info("[LIST] Fetching all providers")
+        val providers = providerService.listAll()
+        return mapOf("code" to 200, "message" to "Fetched all providers", "data" to providers)
     }
 
-    fun onGetById(id: Long, exchange: Exchange): Any {
-        log.info("[GET BY ID] Request received from user for ID = $id")
-        log.info("[GET BY ID] Sending request to database for ID = $id")
-        return try {
+    fun onGetById(exchange: Exchange): Any {
+        val id = exchange.getIn().getHeader("id", String::class.java)?.toLongOrNull()
+        log.info("[GET BY ID] Fetching provider for ID = $id")
+        return if (id != null) {
             val provider = providerService.findById(id)
             if (provider != null) {
-                log.info("[GET BY ID] Response received - ID: ${provider.id}, Name: ${provider.name}, Status: ${provider.status}, SLA Uptime: ${provider.sla?.uptimePercent}, SLA DeliveryTimeMs: ${provider.sla?.deliveryTimeInMs}")
-                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 200)
                 mapOf("code" to 200, "message" to "Fetched provider", "data" to provider)
             } else {
                 log.warn("[GET BY ID] Provider with ID = $id not found")
                 exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 404)
                 mapOf("code" to 404, "message" to "Provider with ID $id not found")
-            }
-        } catch (e: Exception) {
-            log.error("[GET BY ID] Exception: ${e.localizedMessage}")
-            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 500)
-            mapOf("code" to 500, "message" to "Unexpected error", "error" to e.localizedMessage)
-        }
-    }
-
-    fun onCreate(provider: Provider, exchange: Exchange): Any {
-        log.info("[CREATE] Request received - Name: ${provider.name}, Status: ${provider.status}, SLA Uptime: ${provider.sla?.uptimePercent}, SLA DeliveryTimeMs: ${provider.sla?.deliveryTimeInMs}")
-        log.info("[CREATE] Sending create request to database")
-        return try {
-            providerService.create(provider)
-            log.info("[CREATE] Provider created - ID: ${provider.id}, Name: ${provider.name}, Status: ${provider.status}, SLA Uptime: ${provider.sla?.uptimePercent}, SLA DeliveryTimeMs: ${provider.sla?.deliveryTimeInMs}")
-            provider
-        } catch (e: Exception) {
-            if (e.cause?.message?.contains("unique_provider_name", ignoreCase = true) == true) {
-                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 409)
-                log.warn("[CREATE] Duplicate provider name: ${provider.name}")
-                "Provider with name '${provider.name}' already exists"
-            } else {
-                log.error("[CREATE] Exception: ${e.localizedMessage}")
-                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 500)
-                "Unexpected error: ${e.localizedMessage}"
-            }
-        }
-    }
-
-    fun onUpdate(provider: Provider, exchange: Exchange): Any {
-        val providerId = exchange.getIn().getHeader("id", String::class.java)?.toLongOrNull()
-        log.info("[UPDATE] Request received - ID: $providerId, Name: ${provider.name}, Status: ${provider.status}, SLA Uptime: ${provider.sla?.uptimePercent}, SLA DeliveryTimeMs: ${provider.sla?.deliveryTimeInMs}")
-        return if (providerId != null) {
-            log.info("[UPDATE] Sending update request to database for ID = $providerId")
-            try {
-                val updated = providerService.update(providerId, provider)
-                if (updated != null) {
-                    log.info("[UPDATE] Response received - ID: ${updated.id}, Name: ${updated.name}, Status: ${updated.status}, SLA Uptime: ${updated.sla?.uptimePercent}, SLA DeliveryTimeMs: ${updated.sla?.deliveryTimeInMs}")
-                    exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 200)
-                    mapOf("code" to 200, "message" to "Provider updated", "data" to updated)
-                } else {
-                    log.warn("[UPDATE] Provider with ID = $providerId not found")
-                    exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 404)
-                    mapOf("code" to 404, "message" to "Provider with ID $providerId not found")
-                }
-            } catch (e: Exception) {
-                log.error("[UPDATE] Exception: ${e.localizedMessage}")
-                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 500)
-                mapOf("code" to 500, "message" to "Unexpected error", "error" to e.localizedMessage)
+                // exchange.getIn().setBody(mapOf("code" to 404, "message" to "Provider with ID $id not found"))
             }
         } else {
-            log.warn("[UPDATE] Invalid ID in path")
+            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 400)
+            mapOf("code" to 400, "message" to "Invalid ID in path")
+        }
+    }
+
+    fun onCreate(exchange: Exchange): Any {
+        val provider = exchange.getIn().getBody(Provider::class.java)
+        log.info("[CREATE] Creating provider: ${provider.name}")
+        providerService.create(provider)
+        exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 201)
+        return mapOf("code" to 201, "message" to "Provider created", "data" to provider)
+    }
+
+    fun onUpdate(exchange: Exchange): Any {
+        val providerId = exchange.getIn().getHeader("id", String::class.java)?.toLongOrNull()
+        val provider = exchange.getIn().getBody(Provider::class.java)
+        log.info("[UPDATE] Updating provider ID: $providerId")
+        return if (providerId != null) {
+            val updated = providerService.update(providerId, provider)
+            if (updated != null) {
+                mapOf("code" to 200, "message" to "Provider updated", "data" to updated)
+            } else {
+                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 404)
+                mapOf("code" to 404, "message" to "Provider with ID $providerId not found")
+            }
+        } else {
             exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 400)
             mapOf("code" to 400, "message" to "Invalid ID in path")
         }
@@ -571,29 +566,18 @@ class ProviderRoute(private val providerService: ProviderService) : RouteBuilder
 
     fun onDelete(exchange: Exchange): Any {
         val providerId = exchange.getIn().getHeader("id", String::class.java)?.toLongOrNull()
-        log.info("[DELETE] Request received from user for ID = $providerId")
-        return if (providerId == null) {
-            log.warn("[DELETE] Invalid ID in path")
+        log.info("[DELETE] Deleting provider ID: $providerId")
+        return if (providerId != null) {
+            val deleted = providerService.delete(providerId)
+            if (deleted) {
+                mapOf("code" to 200, "message" to "Provider deleted", "data" to mapOf("id" to providerId))
+            } else {
+                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 404)
+                mapOf("code" to 404, "message" to "Provider with ID $providerId not found")
+            }
+        } else {
             exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 400)
             mapOf("code" to 400, "message" to "Invalid ID in path")
-        } else {
-            log.info("[DELETE] Sending delete request to database for ID = $providerId")
-            try {
-                val deleted = providerService.delete(providerId)
-                if (deleted) {
-                    log.info("[DELETE] Provider deleted in database for ID = $providerId")
-                    exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 200)
-                    mapOf("code" to 200, "message" to "Provider deleted", "data" to mapOf("id" to providerId))
-                } else {
-                    log.warn("[DELETE] Provider with ID = $providerId not found")
-                    exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 404)
-                    mapOf("code" to 404, "message" to "Provider with ID $providerId not found")
-                }
-            } catch (e: Exception) {
-                log.error("[DELETE] Exception: ${e.localizedMessage}")
-                exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 500)
-                mapOf("code" to 500, "message" to "Unexpected error", "error" to e.localizedMessage)
-            }
         }
     }
 }
