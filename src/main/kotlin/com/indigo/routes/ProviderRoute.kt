@@ -287,7 +287,7 @@ class ProviderRoute(private val providerService: ProviderService) : RouteBuilder
 
         from("direct:createProviderChannels")
             .log("POST /providers/v1/{id}/channels - Create channels called")
-            .bean(this, "onCreateChannels").marshal().json()
+            .bean(this, "onCreateChannels")
     }
 
     fun onList(exchange: Exchange): Any {
@@ -352,19 +352,19 @@ class ProviderRoute(private val providerService: ProviderService) : RouteBuilder
         }
     }
 
-    fun onCreateChannels(exchange: Exchange): Any {
+    fun onCreateChannels(exchange: Exchange):Any {
         val providerId = exchange.getIn().getHeader("id", String::class.java)?.toLongOrNull()
         val request = exchange.getIn().getBody(ChannelRequest::class.java)
         log.info("[CREATE CHANNELS] For provider ID: $providerId with request: $request")
+
         return if (providerId != null) {
             val channels = providerChannelService.createChannels(providerId, request)
-            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 200)
-            exchange.getIn().setBody(mapOf("code" to 201, "message" to "Channels created", "data" to channels))
-            //  mapOf("code" to 201, "message" to "Channels created", "data" to channels)
+//            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 200)
+            log.info("Channels created: ${channels.toString()}")
+              mapOf("code" to 201, "message" to "Channels created")
         } else {
-            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 400)
-            exchange.getIn().setBody(mapOf("code" to 400, "message" to "Invalid provider ID in path"))
-        //      mapOf("code" to 400, "message" to "Invalid provider ID in path")
+//            exchange.message.setHeader(Exchange.HTTP_RESPONSE_CODE, 400)
+            mapOf("code" to 400, "message" to "Invalid provider ID in path")
         }
     }
 }
